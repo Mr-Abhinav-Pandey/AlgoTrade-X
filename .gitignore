@@ -67,3 +67,11 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# CodeBlocks
+*.layout
+*.depend

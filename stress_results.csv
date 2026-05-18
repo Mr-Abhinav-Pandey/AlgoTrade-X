@@ -1,0 +1,10 @@
+Scenario,Problem,Algorithm,Time_us,Verdict
+Tiny   (N=500, Q=200),A,Brute Force (O(N) per operation),19,PASS
+Medium (N=30k, Q=20k),A,Sqrt Decomposition (O(√N) per operation),1408,PASS
+HFT    (N=100k, Q=100k),A,Fenwick Tree (O(log N) per operation),2306,PASS
+Tiny   (V=10,  E=50),B,Bellman-Ford (O(VE) brute),1,PASS
+Medium (V=100, E=5000),B,Bellman-Ford (O(VE)),429,PASS
+Large  (V=500, E=50000),B,Bellman-Ford (O(VE)),94757,PASS
+Tiny   (T=10,  I=5),C,Optimal DP (O(T·I)),1,PASS
+Medium (T=200, I=100),C,Optimal DP (O(T·I)),67,PASS
+Large  (T=5000,I=1000),C,Optimal DP (O(T·I)),9881,PASS
