@@ -57,7 +57,7 @@ Open `AlgoTrade-X.cbp`. Sources are under `src/`. `variantforge_engine.cpp` is i
 ## Limitations (intentional)
 
 - Public REST only (no WebSocket yet; see `websocket_feed.cpp` stub)
-- Triangular arbitrage uses **mid tickers**, not bid/ask books (conservative `fee_buffer` on reported opportunity)
+- Live arbitrage: **theoretical** layer uses mid tickers; **executable** layer uses bid/ask (`bookTicker` + BTC depth) and 0.1% fee per leg. If bid/ask are missing, the scan still runs with theoretical output only.
 - Windows-only networking (`wininet`)
 
 ## Author

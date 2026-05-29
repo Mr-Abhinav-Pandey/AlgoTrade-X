@@ -108,6 +108,60 @@ OrderBook load_order_book_from_snapshot(const MarketSnapshot& snap) {
     return book;
 }
 
+static bool quote_valid(double bid, double ask) {
+    return bid > 0 && ask > 0 && bid < ask;
+}
+
+static bool parse_book_ticker_bid_ask(const string& json, double& bid, double& ask) {
+    if (json.empty()) return false;
+    try {
+        bid = parse_double(json, "bidPrice");
+        ask = parse_double(json, "askPrice");
+    } catch (const exception&) {
+        return false;
+    }
+    return quote_valid(bid, ask);
+}
+
+static bool btc_bid_ask_from_depth(const MarketSnapshot& snap, double& bid, double& ask) {
+    if (snap.bids.empty() || snap.asks.empty()) return false;
+    bid = 0;
+    ask = 1e300;
+    for (const auto& level : snap.bids) bid = max(bid, level.first);
+    for (const auto& level : snap.asks) ask = min(ask, level.first);
+    return quote_valid(bid, ask);
+}
+
+// Best-effort bid/ask; never fails the snapshot build. Sets executable_ready when all pairs OK.
+static bool try_fill_executable_quotes(MarketSnapshot& snap) {
+    snap.executable_ready = false;
+
+    if (!btc_bid_ask_from_depth(snap, snap.btcusdt_bid, snap.btcusdt_ask)) {
+        cerr << "[WARN] Executable layer: BTCUSDT bid/ask unavailable (depth)\n";
+        return false;
+    }
+
+    struct PairFetch { const char* symbol; double* bid; double* ask; };
+    PairFetch pairs[] = {
+        {"ETHUSDT", &snap.ethusdt_bid, &snap.ethusdt_ask},
+        {"BNBUSDT", &snap.bnbusdt_bid, &snap.bnbusdt_ask},
+        {"ETHBTC",  &snap.ethbtc_bid,  &snap.ethbtc_ask},
+        {"BNBBTC",  &snap.bnbbtc_bid,  &snap.bnbbtc_ask},
+    };
+
+    for (const PairFetch& p : pairs) {
+        string url = string("https://api.binance.com/api/v3/ticker/bookTicker?symbol=") + p.symbol;
+        string json = fetch_binance(url);
+        if (!parse_book_ticker_bid_ask(json, *p.bid, *p.ask)) {
+            cerr << "[WARN] Executable layer: " << p.symbol << " bid/ask unavailable\n";
+            return false;
+        }
+    }
+
+    snap.executable_ready = true;
+    return true;
+}
+
 // Fetches all REST data for one live scan into a single snapshot.
 static bool build_market_snapshot_rest(MarketSnapshot& snap) {
     snap = MarketSnapshot{};
@@ -157,9 +211,12 @@ static bool build_market_snapshot_rest(MarketSnapshot& snap) {
         cerr << "[ERROR] Incomplete market snapshot\n";
         return false;
     }
+
+    snap.executable_ready = try_fill_executable_quotes(snap);
     return true;
 }
 
+static constexpr double TAKER_FEE = 0.001;
 
 Edge make_rate_edge(int u, int v, double rate) {
     Edge e; e.u = u; e.v = v;
@@ -184,6 +241,59 @@ static double best_triangular_gain(double btcusdt, double ethusdt, double bnbusd
     return best;
 }
 
+static double best_triangular_gain_executable(const MarketSnapshot& snap) {
+    const double kEps = 1e-9;
+    auto safe_mul = [kEps](double a, double b) {
+        if (a <= kEps || b <= kEps) return 0.0;
+        return a * b;
+    };
+    const double fee_scale = (1.0 - TAKER_FEE) * (1.0 - TAKER_FEE) * (1.0 - TAKER_FEE);
+
+    double best = 1.0;
+    // USDT -> BTC -> ETH -> USDT (buy @ ask, sell @ bid)
+    best = max(best, safe_mul(
+        safe_mul(1.0 / snap.btcusdt_ask, 1.0 / snap.ethbtc_ask), snap.ethusdt_bid));
+    // USDT -> BTC -> BNB -> USDT
+    best = max(best, safe_mul(
+        safe_mul(1.0 / snap.btcusdt_ask, 1.0 / snap.bnbbtc_ask), snap.bnbusdt_bid));
+    return best * fee_scale;
+}
+
+static vector<Edge> build_fx_edges_mid(const MarketSnapshot& snap) {
+    vector<Edge> edges;
+    const double btcusdt = snap.btcusdt;
+    const double ethusdt = snap.ethusdt;
+    const double bnbusdt = snap.bnbusdt;
+    const double ethbtc = snap.ethbtc;
+    const double bnbbtc = snap.bnbbtc;
+    edges.push_back(make_rate_edge(0, 1, 1.0 / btcusdt));
+    edges.push_back(make_rate_edge(1, 0, btcusdt));
+    edges.push_back(make_rate_edge(0, 2, 1.0 / ethusdt));
+    edges.push_back(make_rate_edge(2, 0, ethusdt));
+    edges.push_back(make_rate_edge(0, 3, 1.0 / bnbusdt));
+    edges.push_back(make_rate_edge(3, 0, bnbusdt));
+    edges.push_back(make_rate_edge(1, 2, 1.0 / ethbtc));
+    edges.push_back(make_rate_edge(2, 1, ethbtc));
+    edges.push_back(make_rate_edge(1, 3, 1.0 / bnbbtc));
+    edges.push_back(make_rate_edge(3, 1, bnbbtc));
+    return edges;
+}
+
+static vector<Edge> build_fx_edges_executable(const MarketSnapshot& snap) {
+    vector<Edge> edges;
+    edges.push_back(make_rate_edge(0, 1, 1.0 / snap.btcusdt_ask));
+    edges.push_back(make_rate_edge(1, 0, snap.btcusdt_bid));
+    edges.push_back(make_rate_edge(0, 2, 1.0 / snap.ethusdt_ask));
+    edges.push_back(make_rate_edge(2, 0, snap.ethusdt_bid));
+    edges.push_back(make_rate_edge(0, 3, 1.0 / snap.bnbusdt_ask));
+    edges.push_back(make_rate_edge(3, 0, snap.bnbusdt_bid));
+    edges.push_back(make_rate_edge(1, 2, 1.0 / snap.ethbtc_ask));
+    edges.push_back(make_rate_edge(2, 1, snap.ethbtc_bid));
+    edges.push_back(make_rate_edge(1, 3, 1.0 / snap.bnbbtc_ask));
+    edges.push_back(make_rate_edge(3, 1, snap.bnbbtc_bid));
+    return edges;
+}
+
 void run_live_scan(int cycle, const MarketSnapshot& snap) {
     (void)cycle;
     const double current_price = snap.btc_mid;
@@ -202,27 +312,8 @@ void run_live_scan(int cycle, const MarketSnapshot& snap) {
 
     // Arbitrage scan (build graph before profiling problem B)
     cout << "\n--- ARBITRAGE SCAN ---\n";
-    const double btcusdt = snap.btcusdt;
-    const double ethusdt = snap.ethusdt;
-    const double bnbusdt = snap.bnbusdt;
-    const double ethbtc = snap.ethbtc;
-    const double bnbbtc = snap.bnbbtc;
-
-    // 0=USDT, 1=BTC, 2=ETH, 3=BNB — matches auditable triangular cycles below.
     const int live_V = 4;
-    vector<Edge> arb_edges;
-    arb_edges.push_back(make_rate_edge(0, 1, 1.0 / btcusdt));
-    arb_edges.push_back(make_rate_edge(1, 0, btcusdt));
-    arb_edges.push_back(make_rate_edge(0, 2, 1.0 / ethusdt));
-    arb_edges.push_back(make_rate_edge(2, 0, ethusdt));
-    arb_edges.push_back(make_rate_edge(0, 3, 1.0 / bnbusdt));
-    arb_edges.push_back(make_rate_edge(3, 0, bnbusdt));
-    arb_edges.push_back(make_rate_edge(1, 2, 1.0 / ethbtc));
-    arb_edges.push_back(make_rate_edge(2, 1, ethbtc));
-    arb_edges.push_back(make_rate_edge(1, 3, 1.0 / bnbbtc));
-    arb_edges.push_back(make_rate_edge(3, 1, bnbbtc));
-
-    vector<Edge> arb_graph = dedupe_fx_edges(arb_edges);
+    vector<Edge> arb_graph = dedupe_fx_edges(build_fx_edges_mid(snap));
     const int live_E = (int)arb_graph.size();
 
     ProblemProfileA liveA = { live_N, live_Q, 0.5 };
@@ -243,21 +334,59 @@ void run_live_scan(int cycle, const MarketSnapshot& snap) {
     cout << "Arbitrage  : " << algoB << "\n";
     cout << "Execution  : " << algoC << "\n";
 
-    bool graph_cycle = arbitrage_negative_cycle(live_V, arb_graph);
-    double tri_gain = best_triangular_gain(btcusdt, ethusdt, bnbusdt, ethbtc, bnbbtc);
+    bool graph_cycle_mid = arbitrage_negative_cycle(live_V, arb_graph);
+    double tri_mid = best_triangular_gain(
+        snap.btcusdt, snap.ethusdt, snap.bnbusdt, snap.ethbtc, snap.bnbbtc);
     const double fee_buffer = 1.0005;
-    bool profitable = tri_gain > fee_buffer;
+    bool theoretical_edge = tri_mid > fee_buffer;
 
     cout << "Detector   : log-rate Bellman-Ford (super-source), edges=" << live_E << "\n";
-    cout << "Neg-cycle  : " << (graph_cycle ? "yes" : "no") << "  (graph model; stress uses " << algoB << ")\n";
-    cout << "Best tri   : " << fixed << setprecision(6) << tri_gain
-         << "x (USDT->BTC->alt->USDT, auditable)\n";
+    cout << "Theoretical (mid ticker):\n";
+    cout << "  Neg-cycle  : " << (graph_cycle_mid ? "yes" : "no")
+         << "  (stress path uses " << algoB << ")\n";
+    cout << "  Best tri   : " << fixed << setprecision(6) << tri_mid
+         << "x (USDT->BTC->alt->USDT)\n";
+    cout << "  Mid edge   : " << (theoretical_edge ? "YES (tri > fee buffer)" : "NO") << "\n";
     cout.unsetf(ios::floatfield);
-    cout << "Opportunity: " << (profitable ? "YES (triangular gain > fees)" : "NO - Market efficient") << "\n";
-    if (profitable) {
-        cout << "Profit($1k): $" << (tri_gain - 1.0) * 1000.0 << "\n";
-    } else if (graph_cycle && !profitable) {
-        cout << "Note       : graph negative cycle without auditable triangle > fees (check rates)\n";
+
+    bool tradable = false;
+    double tri_exec = 1.0;
+    bool graph_cycle_exec = false;
+
+    if (!snap.executable_ready) {
+        cout << "Executable (bid/ask + 3x0.1% fee):\n";
+        cout << "  Status     : UNAVAILABLE (missing or invalid bid/ask; see [WARN] above)\n";
+    } else {
+        vector<Edge> arb_exec = dedupe_fx_edges(build_fx_edges_executable(snap));
+        graph_cycle_exec = arbitrage_negative_cycle(live_V, arb_exec);
+        tri_exec = best_triangular_gain_executable(snap);
+        tradable = tri_exec > 1.0;
+
+        cout << "Executable (bid/ask + 3x0.1% fee):\n";
+        cout << "  Neg-cycle  : " << (graph_cycle_exec ? "yes" : "no") << "\n";
+        cout << "  Best tri   : " << fixed << setprecision(6) << tri_exec
+             << "x (USDT->BTC->alt->USDT)\n";
+        cout.unsetf(ios::floatfield);
+        double spread_bps = 10000.0 * (snap.btcusdt_ask - snap.btcusdt_bid) / snap.btc_mid;
+        cout << "  BTC spread : " << fixed << setprecision(2) << spread_bps << " bps (depth top)\n";
+        cout.unsetf(ios::floatfield);
+    }
+
+    cout << "Tradable     : " << (tradable ? "YES" : "NO") << " (executable triangle > 1.0)\n";
+
+    if (snap.executable_ready) {
+        bool mid_suggests = graph_cycle_mid || tri_mid > 1.0;
+        if (mid_suggests && !tradable) {
+            cout << "Explain      : theoretical edge ~" << fixed << setprecision(2)
+                 << (tri_mid - 1.0) * 10000.0 << " bps (mid); executable ~"
+                 << (tri_exec - 1.0) * 10000.0
+                 << " bps after bid/ask and fees — not tradable\n";
+            cout.unsetf(ios::floatfield);
+        } else if (theoretical_edge && tradable) {
+            cout << "Profit($1k)  : $" << fixed << setprecision(2) << (tri_exec - 1.0) * 1000.0
+                 << " (executable estimate)\n";
+            cout.unsetf(ios::floatfield);
+        }
     }
 
     cout << "\n--- TRADE EXECUTION ---\n";

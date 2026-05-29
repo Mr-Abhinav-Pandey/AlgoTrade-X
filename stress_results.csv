@@ -1,10 +1,10 @@
 Scenario,Problem,Algorithm,Time_us,Verdict
-Tiny   (N=500, Q=200),A,Brute Force (O(N) per operation),17,PASS
-Medium (N=30k, Q=20k),A,Sqrt Decomposition (O(√N) per operation),2630,PASS
-HFT    (N=100k, Q=100k),A,Fenwick Tree (O(log N) per operation),2315,PASS
+Tiny   (N=500, Q=200),A,Brute Force (O(N) per operation),16,PASS
+Medium (N=30k, Q=20k),A,Sqrt Decomposition (O(√N) per operation),1653,PASS
+HFT    (N=100k, Q=100k),A,Fenwick Tree (O(log N) per operation),2429,PASS
 Tiny   (V=10,  E=50),B,Bellman-Ford (O(VE) brute),2,PASS
-Medium (V=100, E=5000),B,Bellman-Ford (O(VE)),502,PASS
-Large  (V=1000, E=120000),B,SPFA (O(VE) worst-case, average faster),464328,PASS
-Tiny   (T=10,  I=5),C,Optimal DP (O(T·I)),10,PASS
-Medium (T=200, I=100),C,Optimal DP (O(T·I)),77,PASS
-Large  (T=5000,I=1000),C,Optimal DP (O(T·I)),10970,PASS
+Medium (V=100, E=5000),B,Bellman-Ford (O(VE)),548,PASS
+Large  (V=1000, E=120000),B,SPFA (O(VE) worst-case, average faster),465737,PASS
+Tiny   (T=10,  I=5),C,Optimal DP (O(T·I)),3,PASS
+Medium (T=200, I=100),C,Optimal DP (O(T·I)),82,PASS
+Large  (T=5000,I=1000),C,Optimal DP (O(T·I)),13781,PASS

@@ -362,6 +362,32 @@ void verify_C() {
     }
 }
 
+// Mid tickers can show a small theoretical edge while bid/ask + fees remove it.
+void verify_arbitrage_executable() {
+    const double fee = 0.001;
+    const double fee_scale = (1.0 - fee) * (1.0 - fee) * (1.0 - fee);
+
+    const double btc_mid = 100000.0;
+    const double eth_mid = 3015.0;
+    const double ethbtc_mid = 0.0301;
+
+    const double tri_mid = (1.0 / btc_mid) * (1.0 / ethbtc_mid) * eth_mid;
+    if (tri_mid <= 1.0) {
+        cerr << "[FAIL] Executable verify setup: expected mid triangle > 1, got " << tri_mid << endl;
+        exit(1);
+    }
+
+    const double btc_ask = 100100.0;
+    const double eth_bid = 3005.0;
+    const double ethbtc_ask = 0.0302;
+
+    const double tri_exec = (1.0 / btc_ask) * (1.0 / ethbtc_ask) * eth_bid * fee_scale;
+    if (tri_exec >= 1.0) {
+        cerr << "[FAIL] Executable verify: expected bid/ask triangle < 1, got " << tri_exec << endl;
+        exit(1);
+    }
+}
+
 vector<int> build_holdCost(int I) {
     vector<int> hC(I + 1);
     for (int i = 0; i <= I; ++i) hC[i] = holdCostFunc(i);
@@ -685,7 +711,7 @@ int variantforge_main() {
     cout << "=== VARIANTFORGE DECISION ENGINE ===\n";
     cout << "Stress-testing all algorithm variants to find where each breaks...\n\n";
 
-    verify_A(); verify_B(); verify_C();
+    verify_A(); verify_B(); verify_C(); verify_arbitrage_executable();
     cout << "All correctness gates passed.\n\n";
     cout.flush();
 

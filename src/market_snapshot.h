@@ -10,14 +10,28 @@
 struct MarketSnapshot {
     int64_t assembled_ms = 0;
 
-    // BTCUSDT reference price (book mid and FX leg share this value).
+    // Mid tickers (theoretical arbitrage layer).
     double btc_mid = 0;
     double btcusdt = 0;
-
     double ethusdt = 0;
     double bnbusdt = 0;
     double ethbtc = 0;
     double bnbbtc = 0;
+
+    // Best bid / ask per pair (executable arbitrage layer).
+    double btcusdt_bid = 0;
+    double btcusdt_ask = 0;
+    double ethusdt_bid = 0;
+    double ethusdt_ask = 0;
+    double bnbusdt_bid = 0;
+    double bnbusdt_ask = 0;
+    double ethbtc_bid = 0;
+    double ethbtc_ask = 0;
+    double bnbbtc_bid = 0;
+    double bnbbtc_ask = 0;
+
+    // True only when every pair has valid bid < ask (see builder in main.cpp).
+    bool executable_ready = false;
 
     std::vector<std::pair<double, double>> bids;
     std::vector<std::pair<double, double>> asks;
