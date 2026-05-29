@@ -1,85 +1,65 @@
 # AlgoTrade-X
-It is a algorithm based recommendation engine prototype in domain of trading. It has a stress mode to test the algorithms breaking point and a real data analysis from binance data every 10 secs.
 
-## Overview
-It is trying to create a high frequency trading advisor without using AI or ML models. We are trying to implement a competitive programming approach on how to fetch, parse and analyze data within the real time constraints using cpp language.
+Algorithmic trading **analysis prototype** in C++: fetches public Binance REST data, profiles the workload, selects a classical algorithm per sub-problem, and runs it. No ML. Windows + MinGW required for live HTTPS.
 
-## Features
-- 2 modes (Stress mode & Live Monitor)
-- Tries multiple algorithms(brute force, optimized, named or specific)
-- Faster than normal aiml projects in python
+## What it does
 
-## Tech Stack (currently)
-- Cpp 
-- Libraries
-- Binance API used
+| Mode | Purpose |
+|------|---------|
+| **VariantForge** (startup) | Correctness checks + micro-benchmarks comparing brute / sqrt / Fenwick, BF / SPFA, greedy / DP on **synthetic** workloads |
+| **Stress test** (menu 2) | Scenarios sized to exercise each DecisionEngine branch |
+| **Live monitor** (menu 1) | Polls BTCUSDT depth + cross rates every 10s; Fenwick order book, log-rate arbitrage check, execution DP |
 
 ## Architecture
-Fetch - parse into json - function run this as parameters - outout shown
 
-## Algorithms Used
-| Algorithm | Problem | Complexity |
-|---|---|---|
-| Fenwick Tree | Order Book | O(log N) |
-| Bellman-Ford | Arbitrage | O(VE) |
-| DP Execution | Trade Scheduling | O(T·I) |
-
-## Build Instructions
-
-### Prerequisites
-- Windows OS
-- MinGW GCC compiler (with C++17 support)
-- Git
-
----
-
-### Option 1 — Code::Blocks (Recommended)
-1. Clone the repository
-```bash
-   git clone https://github.com/YOURUSERNAME/AlgoTrade-X.git
 ```
-2. Open `AlgoTrade-X.cbp` in Code::Blocks
-3. Build → Debug → Build and Run (F9)
-
-> Linker settings for `wininet` and `ws2_32` are pre-configured in the `.cbp` file.
-
----
-
-### Option 2 — CMake (VS Code / Terminal)
-1. Clone the repository
-```bash
-   git clone https://github.com/YOURUSERNAME/AlgoTrade-X.git
-   cd AlgoTrade-X
-```
-2. Build
-```bash
-   mkdir build
-   cd build
-   cmake .. -G "MinGW Makefiles"
-   mingw32-make
-```
-3. Run
-```bash
-   ./bin/AlgoTradeX.exe
+Binance REST → parse JSON → ProblemProfile (N,Q,V,E,T,I)
+                          → DecisionEngine::select_algorithm_*
+                          → run selected structure (live order book = Fenwick; FX = super-source BF; execution = DP or greedy)
 ```
 
-> Requires CMake 3.10+ and MinGW installed and added to PATH.
+The DecisionEngine estimates operation counts against a 10⁸ ops/s budget (competitive-programming style). **Live profiles are derived from the book and graph**, not hardcoded `V*(V-1)`.
 
----
+## Algorithms
 
-### Note
-This project uses Windows-only libraries (`wininet`, `ws2_32`) for HTTPS requests to the Binance API. Linux/Mac builds are not supported currently.
+| Algorithm | Problem | Where used |
+|-----------|---------|------------|
+| Fenwick tree | Indexed order book (1000 price buckets) | `main.cpp` `OrderBook` + live profile A when `N≥1000` |
+| Brute / Sqrt / Fenwick | Range-sum stress tests | `variantforge_engine.cpp`, stress mode |
+| Bellman–Ford (+ super-source for FX) | Arbitrage / negative cycle | `arbitrage_negative_cycle()` live; BF/SPFA variants in stress |
+| DP / Greedy | Sell `I` units in `T` timesteps | Live + stress (`exec_I ≤ exec_T`) |
 
-## Sample Output
-(will paste)
+## Build (CMake)
 
-## Results
-(Benchmark table) - will paste
+**Prerequisites:** Windows, MinGW (C++17), CMake 3.10+, outbound HTTPS.
 
-## Future Work
-Need to add historical analysis of data.
-Real algorithms.
-Research and implement faster api calls.
+```bash
+git clone https://github.com/YOURUSERNAME/AlgoTrade-X.git
+cd AlgoTrade-X
+mkdir build && cd build
+cmake .. -G "MinGW Makefiles"
+mingw32-make
+```
+
+**Run** (from repo root):
+
+```bash
+echo 2 | .\bin\AlgoTradeX.exe    # stress only (offline after fetch at startup)
+echo 1 | .\bin\AlgoTradeX.exe    # live monitor (Ctrl+C to stop)
+```
+
+Executable path: `bin/AlgoTradeX.exe` (not `build/bin`).
+
+## Code::Blocks
+
+Open `AlgoTrade-X.cbp`. Sources are under `src/`. `variantforge_engine.cpp` is included by `main.cpp` (not compiled as a separate unit).
+
+## Limitations (intentional)
+
+- Public REST only (no WebSocket yet; see `websocket_feed.cpp` stub)
+- Triangular arbitrage uses **mid tickers**, not bid/ask books (conservative `fee_buffer` on reported opportunity)
+- Windows-only networking (`wininet`)
 
 ## Author
+
 Abhinav Pandey, JIIT, Noida, India

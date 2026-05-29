@@ -5,6 +5,8 @@
 #include <cmath>
 #include <algorithm>
 #include <fstream>
+#include <exception>
+#include <iomanip>
 #include "variantforge_engine.cpp"
 using namespace std;
 
@@ -107,10 +109,26 @@ OrderBook load_order_book(const string& json, double current_price) {
 
 Edge make_rate_edge(int u, int v, double rate) {
     Edge e; e.u = u; e.v = v;
+    rate = max(rate, 1e-12);
     e.w = (int)(-log(rate) * 10000);
     return e;
 }
 
+// Explicit triangular cycles (USDT=0, BTC=1, ETH=2, BNB=3) for auditable profit reporting.
+static double best_triangular_gain(double btcusdt, double ethusdt, double bnbusdt,
+                                   double ethbtc, double bnbbtc) {
+    const double kEps = 1e-9;
+    auto safe_mul = [kEps](double a, double b) {
+        if (a <= kEps || b <= kEps) return 0.0;
+        return a * b;
+    };
+    double best = 1.0;
+    // USDT -> BTC -> ETH -> USDT
+    best = max(best, safe_mul(safe_mul(1.0 / btcusdt, 1.0 / ethbtc), ethusdt));
+    // USDT -> BTC -> BNB -> USDT
+    best = max(best, safe_mul(safe_mul(1.0 / btcusdt, 1.0 / bnbbtc), bnbusdt));
+    return best;
+}
 
 void run_live_scan(int cycle) {
     cout << "========================================\n";
@@ -119,71 +137,124 @@ void run_live_scan(int cycle) {
     cout.flush();   // <── FIX: flush before slow network calls
 
     string price_json = fetch_binance("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT");
-    double current_price = parse_double(price_json, "price");
+    if (price_json.empty()) {
+        cerr << "[ERROR] Price fetch failed; skipping scan #" << cycle << "\n";
+        return;
+    }
+    double current_price = 0.0;
+    try {
+        current_price = parse_double(price_json, "price");
+    } catch (const exception& ex) {
+        cerr << "[ERROR] Price parse failed: " << ex.what() << "\n";
+        return;
+    }
 
     string book_json = fetch_binance("https://api.binance.com/api/v3/depth?symbol=BTCUSDT&limit=20");
+    if (book_json.empty()) {
+        cerr << "[ERROR] Depth fetch failed; skipping scan #" << cycle << "\n";
+        return;
+    }
     OrderBook book = load_order_book(book_json, current_price);
 
     double lo = current_price - 100, hi = current_price + 100;
     double bid_vol = book.bid_volume(lo, current_price);
     double ask_vol = book.ask_volume(current_price, hi);
 
-    // Decision Engine using live profile
-    int live_N = 1000, live_Q = max((int)(bid_vol + ask_vol) * 10, 1);
-    int live_V = 5,    live_E = live_V * (live_V - 1);
-    int live_T = 50,   live_I = max((int)bid_vol, 1);
+    const int grid_buckets = 1000;
+    auto bid_levels = parse_orders(book_json, "bids");
+    auto ask_levels = parse_orders(book_json, "asks");
+    const int live_N = grid_buckets;
+    const int live_Q = max((int)(bid_levels.size() + ask_levels.size()), 1);
+
+    const int exec_T = 20;
+    const int exec_I = min(max((int)(bid_vol * 10.0 + 0.5), 1), exec_T);
+
+    // Arbitrage scan (build graph before profiling problem B)
+    cout << "\n--- ARBITRAGE SCAN ---\n";
+    double btcusdt = 0, ethusdt = 0, bnbusdt = 0, ethbtc = 0, bnbbtc = 0;
+    try {
+        btcusdt = parse_double(fetch_binance("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"), "price");
+        ethusdt = parse_double(fetch_binance("https://api.binance.com/api/v3/ticker/price?symbol=ETHUSDT"), "price");
+        bnbusdt = parse_double(fetch_binance("https://api.binance.com/api/v3/ticker/price?symbol=BNBUSDT"), "price");
+        ethbtc  = parse_double(fetch_binance("https://api.binance.com/api/v3/ticker/price?symbol=ETHBTC"),  "price");
+        bnbbtc  = parse_double(fetch_binance("https://api.binance.com/api/v3/ticker/price?symbol=BNBBTC"),  "price");
+    } catch (const exception& ex) {
+        cerr << "[ERROR] Cross-rate fetch/parse failed: " << ex.what() << "\n";
+        return;
+    }
+
+    // 0=USDT, 1=BTC, 2=ETH, 3=BNB — matches auditable triangular cycles below.
+    const int live_V = 4;
+    vector<Edge> arb_edges;
+    arb_edges.push_back(make_rate_edge(0, 1, 1.0 / btcusdt));
+    arb_edges.push_back(make_rate_edge(1, 0, btcusdt));
+    arb_edges.push_back(make_rate_edge(0, 2, 1.0 / ethusdt));
+    arb_edges.push_back(make_rate_edge(2, 0, ethusdt));
+    arb_edges.push_back(make_rate_edge(0, 3, 1.0 / bnbusdt));
+    arb_edges.push_back(make_rate_edge(3, 0, bnbusdt));
+    arb_edges.push_back(make_rate_edge(1, 2, 1.0 / ethbtc));
+    arb_edges.push_back(make_rate_edge(2, 1, ethbtc));
+    arb_edges.push_back(make_rate_edge(1, 3, 1.0 / bnbbtc));
+    arb_edges.push_back(make_rate_edge(3, 1, bnbbtc));
+
+    vector<Edge> arb_graph = dedupe_fx_edges(arb_edges);
+    const int live_E = (int)arb_graph.size();
+
     ProblemProfileA liveA = { live_N, live_Q, 0.5 };
     ProblemProfileB liveB = { live_V, live_E };
-    ProblemProfileC liveC = { live_T, live_I };
+    ProblemProfileC liveC = { exec_T, exec_I };
+
+    string algoA, algoB, algoC, logicA, logicB, logicC, tleA, tleB, tleC;
+    algoA = DecisionEngine::select_algorithm_A(liveA, logicA, tleA);
+    algoB = DecisionEngine::select_algorithm_B(liveB, logicB, tleB);
+    algoC = DecisionEngine::select_algorithm_C(liveC, logicC, tleC);
 
     cout << "\n--- DECISION ENGINE ---\n";
     cout << "BTC Price : $" << current_price << "\n";
-    { string lg, tr; cout << "Order Book : " << DecisionEngine::select_algorithm_A(liveA, lg, tr) << "\n"; }
-    { string lg, tr; cout << "Arbitrage  : " << DecisionEngine::select_algorithm_B(liveB, lg, tr) << "\n"; }
-    { string lg, tr; cout << "Execution  : " << DecisionEngine::select_algorithm_C(liveC, lg, tr) << "\n"; }
+    cout << "Profile A : N=" << live_N << " Q=" << live_Q << " (bucket grid + book levels/scan)\n";
+    cout << "Profile B : V=" << live_V << " E=" << live_E << " (deduped FX edges)\n";
+    cout << "Profile C : T=" << exec_T << " I=" << exec_I << " (inventory capped by horizon)\n";
+    cout << "Order Book : " << algoA << "  [" << (algoA.find("Fenwick") != string::npos ? "using Fenwick OrderBook" : "see stress mode") << "]\n";
+    cout << "Arbitrage  : " << algoB << "\n";
+    cout << "Execution  : " << algoC << "\n";
 
-    // Arbitrage scan
-    cout << "\n--- ARBITRAGE SCAN ---\n";
-    double btcusdt = parse_double(fetch_binance("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"), "price");
-    double ethusdt = parse_double(fetch_binance("https://api.binance.com/api/v3/ticker/price?symbol=ETHUSDT"), "price");
-    double bnbusdt = parse_double(fetch_binance("https://api.binance.com/api/v3/ticker/price?symbol=BNBUSDT"), "price");
-    double solusdt = parse_double(fetch_binance("https://api.binance.com/api/v3/ticker/price?symbol=SOLUSDT"), "price");
-    double ethbtc  = parse_double(fetch_binance("https://api.binance.com/api/v3/ticker/price?symbol=ETHBTC"),  "price");
-    double bnbbtc  = parse_double(fetch_binance("https://api.binance.com/api/v3/ticker/price?symbol=BNBBTC"),  "price");
+    bool graph_cycle = arbitrage_negative_cycle(live_V, arb_graph);
+    double tri_gain = best_triangular_gain(btcusdt, ethusdt, bnbusdt, ethbtc, bnbbtc);
+    const double fee_buffer = 1.0005;
+    bool profitable = tri_gain > fee_buffer;
 
-    vector<Edge> arb_edges;
-    arb_edges.push_back(make_rate_edge(0,1,1.0/btcusdt)); arb_edges.push_back(make_rate_edge(1,0,btcusdt));
-    arb_edges.push_back(make_rate_edge(0,2,1.0/ethusdt)); arb_edges.push_back(make_rate_edge(2,0,ethusdt));
-    arb_edges.push_back(make_rate_edge(0,3,1.0/bnbusdt)); arb_edges.push_back(make_rate_edge(3,0,bnbusdt));
-    arb_edges.push_back(make_rate_edge(0,4,1.0/solusdt)); arb_edges.push_back(make_rate_edge(4,0,solusdt));
-    arb_edges.push_back(make_rate_edge(1,2,1.0/ethbtc));  arb_edges.push_back(make_rate_edge(2,1,ethbtc));
-    arb_edges.push_back(make_rate_edge(1,3,1.0/bnbbtc));  arb_edges.push_back(make_rate_edge(3,1,bnbbtc));
-    // Explicit triangles
-    arb_edges.push_back(make_rate_edge(0,1,1.0/btcusdt)); arb_edges.push_back(make_rate_edge(1,2,1.0/ethbtc));
-    arb_edges.push_back(make_rate_edge(2,0,ethusdt));      arb_edges.push_back(make_rate_edge(0,2,1.0/ethusdt));
-    arb_edges.push_back(make_rate_edge(2,1,ethbtc));       arb_edges.push_back(make_rate_edge(1,0,btcusdt));
-
-    bool arb_found = bellman_ford_opt(5, arb_edges);
-    cout << "Opportunity : " << (arb_found ? "YES - Negative cycle detected!" : "NO - Market efficient") << "\n";
-    if (arb_found) {
-        double cycle_gain = (1.0 / btcusdt) * (1.0 / ethbtc) * ethusdt;
-        cout << "Cycle Gain  : " << cycle_gain << "\n";
-        cout << "Profit($1k) : $" << (cycle_gain - 1.0) * 1000.0 << "\n";
+    cout << "Detector   : log-rate Bellman-Ford (super-source), edges=" << live_E << "\n";
+    cout << "Neg-cycle  : " << (graph_cycle ? "yes" : "no") << "  (graph model; stress uses " << algoB << ")\n";
+    cout << "Best tri   : " << fixed << setprecision(6) << tri_gain
+         << "x (USDT->BTC->alt->USDT, auditable)\n";
+    cout.unsetf(ios::floatfield);
+    cout << "Opportunity: " << (profitable ? "YES (triangular gain > fees)" : "NO - Market efficient") << "\n";
+    if (profitable) {
+        cout << "Profit($1k): $" << (tri_gain - 1.0) * 1000.0 << "\n";
+    } else if (graph_cycle && !profitable) {
+        cout << "Note       : graph negative cycle without auditable triangle > fees (check rates)\n";
     }
 
-    // DP Execution
     cout << "\n--- TRADE EXECUTION ---\n";
-    int exec_T = 20, exec_I = max((int)(bid_vol * 10), 1);
     vector<int> exec_tradeCost(exec_T);
     for (int t = 0; t < exec_T; ++t)
-        exec_tradeCost[t] = (t % 2 == 0) ? (int)(ask_vol * 100) : (int)(ask_vol * 50);
+        exec_tradeCost[t] = (t % 2 == 0) ? max((int)(ask_vol * 100), 1) : max((int)(ask_vol * 50), 1);
     vector<int> exec_holdCost = build_holdCost(exec_I);
-    int cost_greedy = greedy_execute(exec_T, exec_I, exec_tradeCost, exec_holdCost);
-    int cost_dp     = dp_execute    (exec_T, exec_I, exec_tradeCost, exec_holdCost);
-    cout << "Inventory   : " << exec_I     << " units\n";
-    cout << "Greedy cost : " << cost_greedy << "\n";
-    cout << "DP cost     : " << cost_dp     << "\n";
-    cout << "DP Savings  : " << (cost_greedy - cost_dp) << " units\n";
+
+    int cost_greedy = -1, cost_dp = -1;
+    if (algoC.find("Greedy") != string::npos) {
+        cost_greedy = greedy_execute(exec_T, exec_I, exec_tradeCost, exec_holdCost);
+        cout << "Method      : Greedy (per DecisionEngine, T*I too large for DP)\n";
+        cout << "Greedy cost : " << cost_greedy << "\n";
+    } else {
+        cost_greedy = greedy_execute(exec_T, exec_I, exec_tradeCost, exec_holdCost);
+        cost_dp = dp_execute(exec_T, exec_I, exec_tradeCost, exec_holdCost);
+        cout << "Method      : DP vs Greedy baseline (per DecisionEngine)\n";
+        cout << "Greedy cost : " << cost_greedy << "\n";
+        cout << "DP cost     : " << cost_dp << "\n";
+        cout << "DP Savings  : " << (cost_greedy - cost_dp) << " units\n";
+    }
+    cout << "Inventory   : " << exec_I << " units (max " << exec_T << " sells in horizon)\n";
 
     // Signal
     cout << "\n--- SIGNAL ---\n";

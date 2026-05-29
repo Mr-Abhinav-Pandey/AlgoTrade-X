@@ -214,6 +214,57 @@ bool bellman_ford_opt(int V, const vector<Edge>& edges) {
     return false;
 }
 
+// Deduplicate directed FX edges; keep best (minimum) log-cost per (u,v).
+vector<Edge> dedupe_fx_edges(vector<Edge> edges) {
+    map<pair<int, int>, int> best;
+    for (const Edge& e : edges) {
+        pair<int, int> key = {e.u, e.v};
+        if (!best.count(key) || e.w < best[key])
+            best[key] = e.w;
+    }
+    vector<Edge> out;
+    out.reserve(best.size());
+    for (const auto& kv : best) {
+        out.push_back({kv.first.first, kv.first.second, kv.second});
+    }
+    return out;
+}
+
+// Log-rate graph negative-cycle test with a super-source (standard FX arbitrage model).
+// Vertex 0..V-1 are currencies; no zero-weight cycle artifacts from dist[]=0 on all nodes.
+static const int ARB_INF = 400000000;
+
+bool arbitrage_negative_cycle(int V, vector<Edge> edges) {
+    edges = dedupe_fx_edges(std::move(edges));
+    const int S = V;
+    const int n = V + 1;
+    vector<int> dist(n, ARB_INF);
+    dist[S] = 0;
+
+    vector<Edge> all = edges;
+    for (int i = 0; i < V; ++i)
+        all.push_back({S, i, 0});
+
+    for (int pass = 0; pass < n - 1; ++pass) {
+        bool relaxed = false;
+        for (const Edge& e : all) {
+            if (dist[e.u] == ARB_INF) continue;
+            long long nd = (long long)dist[e.u] + e.w;
+            if (nd < dist[e.v]) {
+                dist[e.v] = (int)nd;
+                relaxed = true;
+            }
+        }
+        if (!relaxed) break;
+    }
+
+    for (const Edge& e : edges) {
+        if (dist[e.u] != ARB_INF && (long long)dist[e.u] + e.w < dist[e.v])
+            return true;
+    }
+    return false;
+}
+
 void verify_B() {
     vector<Edge> test_edges;
     test_edges.push_back({0, 1, -1});
@@ -346,8 +397,16 @@ struct DecisionEngine {
         double ops_sqrt = 1.0 * p.Q * sqrt(p.N);
         double ops_fenwick = 1.0 * p.Q * log2(p.N);
 
-        if (p.N <= 1000 && p.Q <= 1000) {
-            logic = "N and Q are very small; brute force is sufficient and simpler.";
+        // Live order book uses a fixed-size bucket grid (see main.cpp OrderBook).
+        if (p.N >= 1000 && p.N <= 10000) {
+            logic = "Bucket-indexed book (" + to_string(p.N) + " levels, " + to_string(p.Q)
+                + " updates/scan): Fenwick tree is the structure used in live code.";
+            tle_risk = high_tle_risk(ops_fenwick) ? "High" : "Low";
+            return "Fenwick Tree (O(log N) per operation)";
+        }
+
+        if (p.N <= 500 && p.Q <= 200) {
+            logic = "Small N and Q; brute force is sufficient for synthetic micro-books.";
             tle_risk = high_tle_risk(ops_brute) ? "High" : "Low";
             return "Brute Force (O(N) per operation)";
         }
@@ -505,7 +564,7 @@ void run_stress_test() {
     vector<ScenB> scenB = {
         {"Tiny   (V=10,  E=50)",    10,  50,    "Bellman-Ford brute"},
         {"Medium (V=100, E=5000)",  100, 5000,  "Bellman-Ford O(VE)"},
-        {"Large  (V=500, E=50000)", 500, 50000, "SPFA"},
+        {"Large  (V=1000, E=120000)", 1000, 120000, "SPFA"},
     };
 
     for (auto& sc : scenB) {

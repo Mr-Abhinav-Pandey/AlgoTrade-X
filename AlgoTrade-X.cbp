@@ -25,10 +25,11 @@
 			<Add library="wininet" />
 			<Add library="ws2_32" />
 		</Linker>
-		<Unit filename="fetcher.cpp" />
-		<Unit filename="main.cpp" />
-		<Unit filename="parser.cpp" />
-		<Unit filename="variantforge_engine.cpp">
+		<Unit filename="src/fetcher.cpp" />
+		<Unit filename="src/main.cpp" />
+		<Unit filename="src/parser.cpp" />
+		<Unit filename="src/websocket_feed.cpp" />
+		<Unit filename="src/variantforge_engine.cpp">
 			<Option compile="0" />
 			<Option link="0" />
 		</Unit>
