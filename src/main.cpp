@@ -7,6 +7,8 @@
 #include <fstream>
 #include <exception>
 #include <iomanip>
+#include <chrono>
+#include "market_snapshot.h"
 #include "variantforge_engine.cpp"
 using namespace std;
 
@@ -98,12 +100,64 @@ vector<pair<double,double>> parse_orders(const string& json, const string& side)
     return orders;
 }
 
-OrderBook load_order_book(const string& json, double current_price) {
-    OrderBook book(current_price - 500.0, 1.0, 1000);
-    book.mid_price = current_price;
-    for (auto& b : parse_orders(json, "bids")) book.add_bid(b.first, b.second);
-    for (auto& a : parse_orders(json, "asks")) book.add_ask(a.first, a.second);
+OrderBook load_order_book_from_snapshot(const MarketSnapshot& snap) {
+    OrderBook book(snap.btc_mid - 500.0, 1.0, 1000);
+    book.mid_price = snap.btc_mid;
+    for (const auto& b : snap.bids) book.add_bid(b.first, b.second);
+    for (const auto& a : snap.asks) book.add_ask(a.first, a.second);
     return book;
+}
+
+// Fetches all REST data for one live scan into a single snapshot.
+static bool build_market_snapshot_rest(MarketSnapshot& snap) {
+    snap = MarketSnapshot{};
+    snap.assembled_ms = chrono::duration_cast<chrono::milliseconds>(
+        chrono::system_clock::now().time_since_epoch()).count();
+
+    string price_json = fetch_binance("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT");
+    if (price_json.empty()) {
+        cerr << "[ERROR] Price fetch failed\n";
+        return false;
+    }
+    try {
+        snap.btc_mid = parse_double(price_json, "price");
+        snap.btcusdt = snap.btc_mid;
+    } catch (const exception& ex) {
+        cerr << "[ERROR] Price parse failed: " << ex.what() << "\n";
+        return false;
+    }
+
+    string book_json = fetch_binance("https://api.binance.com/api/v3/depth?symbol=BTCUSDT&limit=20");
+    if (book_json.empty()) {
+        cerr << "[ERROR] Depth fetch failed\n";
+        return false;
+    }
+    snap.bids = parse_orders(book_json, "bids");
+    snap.asks = parse_orders(book_json, "asks");
+    if (snap.bids.empty() || snap.asks.empty()) {
+        cerr << "[ERROR] Depth parse failed (empty book)\n";
+        return false;
+    }
+
+    try {
+        snap.ethusdt = parse_double(
+            fetch_binance("https://api.binance.com/api/v3/ticker/price?symbol=ETHUSDT"), "price");
+        snap.bnbusdt = parse_double(
+            fetch_binance("https://api.binance.com/api/v3/ticker/price?symbol=BNBUSDT"), "price");
+        snap.ethbtc = parse_double(
+            fetch_binance("https://api.binance.com/api/v3/ticker/price?symbol=ETHBTC"), "price");
+        snap.bnbbtc = parse_double(
+            fetch_binance("https://api.binance.com/api/v3/ticker/price?symbol=BNBBTC"), "price");
+    } catch (const exception& ex) {
+        cerr << "[ERROR] Cross-rate fetch/parse failed: " << ex.what() << "\n";
+        return false;
+    }
+
+    if (!snap.is_complete()) {
+        cerr << "[ERROR] Incomplete market snapshot\n";
+        return false;
+    }
+    return true;
 }
 
 
@@ -130,58 +184,29 @@ static double best_triangular_gain(double btcusdt, double ethusdt, double bnbusd
     return best;
 }
 
-void run_live_scan(int cycle) {
-    cout << "========================================\n";
-    cout << "SCAN #" << cycle << "\n";
-    cout << "========================================\n";
-    cout.flush();   // <── FIX: flush before slow network calls
-
-    string price_json = fetch_binance("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT");
-    if (price_json.empty()) {
-        cerr << "[ERROR] Price fetch failed; skipping scan #" << cycle << "\n";
-        return;
-    }
-    double current_price = 0.0;
-    try {
-        current_price = parse_double(price_json, "price");
-    } catch (const exception& ex) {
-        cerr << "[ERROR] Price parse failed: " << ex.what() << "\n";
-        return;
-    }
-
-    string book_json = fetch_binance("https://api.binance.com/api/v3/depth?symbol=BTCUSDT&limit=20");
-    if (book_json.empty()) {
-        cerr << "[ERROR] Depth fetch failed; skipping scan #" << cycle << "\n";
-        return;
-    }
-    OrderBook book = load_order_book(book_json, current_price);
+void run_live_scan(int cycle, const MarketSnapshot& snap) {
+    (void)cycle;
+    const double current_price = snap.btc_mid;
+    OrderBook book = load_order_book_from_snapshot(snap);
 
     double lo = current_price - 100, hi = current_price + 100;
     double bid_vol = book.bid_volume(lo, current_price);
     double ask_vol = book.ask_volume(current_price, hi);
 
     const int grid_buckets = 1000;
-    auto bid_levels = parse_orders(book_json, "bids");
-    auto ask_levels = parse_orders(book_json, "asks");
     const int live_N = grid_buckets;
-    const int live_Q = max((int)(bid_levels.size() + ask_levels.size()), 1);
+    const int live_Q = max((int)(snap.bids.size() + snap.asks.size()), 1);
 
     const int exec_T = 20;
     const int exec_I = min(max((int)(bid_vol * 10.0 + 0.5), 1), exec_T);
 
     // Arbitrage scan (build graph before profiling problem B)
     cout << "\n--- ARBITRAGE SCAN ---\n";
-    double btcusdt = 0, ethusdt = 0, bnbusdt = 0, ethbtc = 0, bnbbtc = 0;
-    try {
-        btcusdt = parse_double(fetch_binance("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"), "price");
-        ethusdt = parse_double(fetch_binance("https://api.binance.com/api/v3/ticker/price?symbol=ETHUSDT"), "price");
-        bnbusdt = parse_double(fetch_binance("https://api.binance.com/api/v3/ticker/price?symbol=BNBUSDT"), "price");
-        ethbtc  = parse_double(fetch_binance("https://api.binance.com/api/v3/ticker/price?symbol=ETHBTC"),  "price");
-        bnbbtc  = parse_double(fetch_binance("https://api.binance.com/api/v3/ticker/price?symbol=BNBBTC"),  "price");
-    } catch (const exception& ex) {
-        cerr << "[ERROR] Cross-rate fetch/parse failed: " << ex.what() << "\n";
-        return;
-    }
+    const double btcusdt = snap.btcusdt;
+    const double ethusdt = snap.ethusdt;
+    const double bnbusdt = snap.bnbusdt;
+    const double ethbtc = snap.ethbtc;
+    const double bnbbtc = snap.bnbbtc;
 
     // 0=USDT, 1=BTC, 2=ETH, 3=BNB — matches auditable triangular cycles below.
     const int live_V = 4;
@@ -299,7 +324,20 @@ int main() {
 
     int cycle = 1;
     while (true) {
-        run_live_scan(cycle++);
+        cout << "========================================\n";
+        cout << "SCAN #" << cycle << "\n";
+        cout << "========================================\n";
+        cout.flush();
+
+        MarketSnapshot snap;
+        if (!build_market_snapshot_rest(snap)) {
+            cerr << "[ERROR] Skipping scan #" << cycle << "\n";
+            cycle++;
+            _sleep(10000);
+            continue;
+        }
+
+        run_live_scan(cycle++, snap);
         _sleep(10000);
     }
 
