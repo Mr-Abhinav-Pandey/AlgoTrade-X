@@ -34,7 +34,7 @@ The DecisionEngine estimates operation counts against a 10⁸ ops/s budget (comp
 **Prerequisites:** Windows, MinGW (C++17), CMake 3.10+, outbound HTTPS.
 
 ```bash
-git clone https://github.com/YOURUSERNAME/AlgoTrade-X.git
+git clone https://github.com/Mr-Abhinav-Pandey/AlgoTrade-X.git
 cd AlgoTrade-X
 mkdir build && cd build
 cmake .. -G "MinGW Makefiles"
