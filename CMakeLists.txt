@@ -11,6 +11,8 @@ add_executable(AlgoTradeX
     src/websocket_feed.cpp
 )
 
+target_include_directories(AlgoTradeX PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
 if(WIN32)
     target_compile_definitions(AlgoTradeX PRIVATE
         _WIN32_WINNT=0x0601

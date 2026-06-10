@@ -1,9 +1,11 @@
 #include "websocket_feed.h"
+#include "realtime/realtime_interfaces.h"
+#include "realtime/realtime_config.h"
 #include <iostream>
 
-// TODO: Implement real WebSocket connection
-// Requires: Boost.Beast, Boost.Asio, OpenSSL
-// Status: Infrastructure placeholder
+// Realtime architecture skeleton.
+// Phase 1 introduces abstract interfaces and configuration objects.
+// Concrete websocket implementation will be added in later commits.
 
 void run_websocket_feed_test()
 {
