@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include "market_snapshot.h"
+#include "connection_state.h"
 
 namespace realtime {
 
@@ -40,6 +41,8 @@ public:
     virtual bool is_connected() const = 0;
     virtual void send(const std::string& message) = 0;
     virtual void set_message_handler(std::function<void(const std::string&)> handler) = 0;
+    virtual void subscribe(const std::string& stream) = 0;
+    virtual ConnectionState get_connection_state() const = 0;
 };
 
 class IStreamManager {
