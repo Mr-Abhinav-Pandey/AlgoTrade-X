@@ -1,4 +1,7 @@
 #include "websocket_client.h"
+#ifdef BUILD_WITH_BOOST_BEAST
+#include "websocket_beast_client.h"
+#endif
 #include <thread>
 #include <atomic>
 #include <chrono>
@@ -121,12 +124,12 @@ std::unique_ptr<IWebSocketClient> create_binance_websocket_client() {
     // If built with Boost.Beast, prefer the real implementation
 #ifdef BUILD_WITH_BOOST_BEAST
     try {
-        return std::unique_ptr<IWebSocketClient>(new WebSocketBeastClient());
+        return std::make_unique<WebSocketBeastClient>();
     } catch (...) {
-        return std::unique_ptr<IWebSocketClient>(new BinanceWebSocketClient());
+        return std::make_unique<BinanceWebSocketClient>();
     }
 #else
-    return std::unique_ptr<IWebSocketClient>(new BinanceWebSocketClient());
+    return std::make_unique<BinanceWebSocketClient>();
 #endif
 }
 

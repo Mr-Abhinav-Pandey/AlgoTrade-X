@@ -16,6 +16,7 @@ struct WebSocketClientConfig {
     int reconnect_backoff_ms = 1000;
     bool auto_reconnect = true;
     bool verbose_logging = false;
+    bool verify_peer = true;
 };
 
 struct StreamManagerConfig {

@@ -8,8 +8,14 @@
 #include <exception>
 #include <iomanip>
 #include <chrono>
+#include <mutex>
+#include <condition_variable>
 #include "market_snapshot.h"
 #include "variantforge_engine.cpp"
+#ifdef BUILD_WITH_BOOST_BEAST
+#include "realtime/binance_stream_parser.h"
+#include "realtime/websocket_beast_client.h"
+#endif
 using namespace std;
 
 // Forward declarations (fetcher.cpp and parser.cpp)
@@ -445,6 +451,66 @@ int main() {
         cout.flush();
         _sleep(3000);
     }
+
+#ifdef BUILD_WITH_BOOST_BEAST
+    {
+        std::mutex mtx;
+        std::condition_variable cv;
+        int message_count = 0;
+        realtime::BinanceStreamParser parser;
+        realtime::WebSocketBeastClient client;
+        realtime::WebSocketClientConfig ws_config;
+        ws_config.uri = "wss://stream.binance.com:9443/ws/btcusdt@ticker";
+        ws_config.verbose_logging = true;
+        ws_config.verify_peer = false;
+
+        client.configure(ws_config);
+        client.set_message_handler([&](const std::string& raw_message) {
+            static int raw_received = 0;
+            if (raw_received < 3) {
+                cout << "[RAW " << (raw_received + 1) << "] " << raw_message << "\n";
+            }
+            ++raw_received;
+
+            auto event = parser.parse(raw_message);
+            if (event.type == realtime::BinanceUpdateType::TICKER) {
+                cout << "[WS] symbol=" << event.ticker.symbol
+                     << " last=" << event.ticker.last_price
+                     << " bid=" << event.ticker.bid_price
+                     << " ask=" << event.ticker.ask_price
+                     << " time=" << event.ticker.event_time << "\n";
+                {
+                    std::lock_guard<std::mutex> lock(mtx);
+                    ++message_count;
+                }
+                cv.notify_one();
+            } else if (event.type == realtime::BinanceUpdateType::SUBSCRIPTION_RESPONSE) {
+                cout << "[WS] subscription response: " << event.debug_message << "\n";
+            } else if (event.type == realtime::BinanceUpdateType::UNKNOWN) {
+                cout << "[WS] unknown message: " << event.debug_message << "\n";
+            }
+        });
+
+        try {
+            client.connect();
+            client.subscribe("btcusdt@ticker");
+        } catch (const std::exception& ex) {
+            cout << "[WS] connect failed: " << ex.what() << "\n";
+            return 0;
+        }
+
+        {
+            std::unique_lock<std::mutex> lock(mtx);
+            if (!cv.wait_for(lock, std::chrono::seconds(20), [&]{ return message_count >= 10; })) {
+                cout << "[WS] timed out waiting for messages (" << message_count << ")\n";
+            }
+        }
+
+        client.disconnect();
+        cout << "[WS] test complete, received " << message_count << " ticker messages\n";
+        return 0;
+    }
+#endif
 
     // LIVE MODE
     cout << "\n=== ARBITRAGEX LIVE MONITOR STARTED ===\n";

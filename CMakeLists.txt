@@ -20,14 +20,29 @@ add_executable(AlgoTradeX
 target_include_directories(AlgoTradeX PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
 if(BUILD_WITH_BOOST_BEAST)
-    find_package(Boost 1.66 REQUIRED COMPONENTS system thread)
-    find_package(OpenSSL REQUIRED)
-    find_package(nlohmann_json REQUIRED)
-    target_compile_definitions(AlgoTradeX PRIVATE BUILD_WITH_BOOST_BEAST=1)
-    target_sources(AlgoTradeX PRIVATE src/realtime/websocket_beast_client.cpp src/realtime/websocket_beast_client.h)
-    target_link_libraries(AlgoTradeX PRIVATE ${Boost_LIBRARIES} OpenSSL::SSL OpenSSL::Crypto nlohmann_json::nlohmann_json)
-    target_include_directories(AlgoTradeX PRIVATE ${Boost_INCLUDE_DIRS})
+
+find_package(OpenSSL REQUIRED)
+find_package(nlohmann_json CONFIG REQUIRED)
+
+target_compile_definitions(
+    AlgoTradeX PRIVATE
+    BUILD_WITH_BOOST_BEAST=1
+)
+
+target_sources(
+    AlgoTradeX PRIVATE
+    src/realtime/websocket_beast_client.cpp
+)
+
+target_link_libraries(
+    AlgoTradeX PRIVATE
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    nlohmann_json::nlohmann_json
+)
+
 endif()
+
 
 if(WIN32)
     target_compile_definitions(AlgoTradeX PRIVATE

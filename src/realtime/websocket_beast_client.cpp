@@ -25,8 +25,11 @@ struct WebSocketBeastClient::Impl {
     net::ssl::context ctx{net::ssl::context::tlsv12_client};
     std::unique_ptr<websocket::stream<beast::ssl_stream<tcp::socket>>> ws;
     std::thread ioc_thread;
-    std::mutex mtx;
+    std::thread read_thread;
+    std::mutex mtx; // protects subscriptions and state transitions
+    std::mutex write_mtx; // serializes writes
     std::vector<std::string> subscriptions;
+    std::atomic<bool> stop_requested{false};
 
     Impl() {
         ctx.set_default_verify_paths();
@@ -42,13 +45,20 @@ struct WebSocketBeastClient::Impl {
     }
 
     void stop() {
+        stop_requested = true;
         try {
+            std::lock_guard<std::mutex> lk(mtx);
             if (ws && ws->is_open()) {
+                // Close the underlying socket to safely interrupt blocking reads
                 beast::error_code ec;
-                ws->close(websocket::close_code::normal, ec);
+                beast::get_lowest_layer(*ws).close(ec);
+                if (config.verbose_logging && ec) std::cerr << "[lowest_layer close ec] " << ec.message() << "\n";
             }
         } catch (...) {}
+
+        // Stop io_context and join threads
         ioc.stop();
+        if (read_thread.joinable()) read_thread.join();
         if (ioc_thread.joinable()) ioc_thread.join();
         state = ConnectionState::SHUTDOWN;
     }
@@ -81,9 +91,13 @@ void WebSocketBeastClient::connect() {
     }
     std::string hostport = uri.substr(https_prefix.size());
     std::string host = hostport;
+    std::string target = "/";
     std::string port = "443";
     auto pos = hostport.find('/');
-    if (pos != std::string::npos) host = hostport.substr(0,pos);
+    if (pos != std::string::npos) {
+        host = hostport.substr(0,pos);
+        target = hostport.substr(pos);
+    }
     auto colon = host.find(':');
     if (colon != std::string::npos) {
         port = host.substr(colon+1);
@@ -95,22 +109,37 @@ void WebSocketBeastClient::connect() {
     auto const results = resolver.resolve(host, port);
     impl_->ws = std::make_unique<websocket::stream<beast::ssl_stream<tcp::socket>>>(impl_->ioc, impl_->ctx);
 
-    beast::get_lowest_layer(*impl_->ws).connect(results);
+    if (impl_->config.verify_peer) {
+        impl_->ctx.set_verify_mode(net::ssl::verify_peer);
+    } else {
+        impl_->ctx.set_verify_mode(net::ssl::verify_none);
+    }
+
+    net::connect(beast::get_lowest_layer(*impl_->ws), results);
+
+    if (impl_->config.verify_peer) {
+        impl_->ctx.set_verify_mode(net::ssl::verify_peer);
+        impl_->ws->next_layer().set_verify_mode(net::ssl::verify_peer);
+    } else {
+        impl_->ctx.set_verify_mode(net::ssl::verify_none);
+        impl_->ws->next_layer().set_verify_mode(net::ssl::verify_none);
+    }
+
     impl_->ws->next_layer().handshake(net::ssl::stream_base::client);
     impl_->ws->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
-    impl_->ws->handshake(host, "/");
+    impl_->ws->handshake(host, target);
 
     impl_->state = ConnectionState::CONNECTED;
 
     // Start ioc thread
     impl_->ioc_thread = std::thread([this]{ impl_->run_io(); });
 
-    // Start read loop asynchronously
+    // Start a single dedicated read thread (joinable)
     auto self = impl_.get();
-    std::thread([self](){
+    impl_->read_thread = std::thread([self](){
         beast::flat_buffer buffer;
         try {
-            while (self->ws && self->ws->is_open()) {
+            while (!self->stop_requested.load() && self->ws && self->ws->is_open()) {
                 beast::error_code ec;
                 self->ws->read(buffer, ec);
                 if (ec) {
@@ -124,7 +153,7 @@ void WebSocketBeastClient::connect() {
             if (self->config.verbose_logging) std::cerr << "[beast read exception] " << ex.what() << "\n";
         }
         self->state = ConnectionState::DISCONNECTED;
-    }).detach();
+    });
 }
 
 void WebSocketBeastClient::disconnect() {
@@ -137,8 +166,10 @@ bool WebSocketBeastClient::is_connected() const {
 
 void WebSocketBeastClient::send(const std::string& message) {
     if (!impl_->ws) return;
+    std::lock_guard<std::mutex> lk(impl_->write_mtx);
     beast::error_code ec;
     impl_->ws->write(net::buffer(message), ec);
+    if (ec && impl_->config.verbose_logging) std::cerr << "[beast write ec] " << ec.message() << "\n";
 }
 
 void WebSocketBeastClient::subscribe(const std::string& stream) {

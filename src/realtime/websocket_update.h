@@ -17,6 +17,7 @@ enum class BinanceUpdateType {
 struct RawTickerUpdate {
     std::string stream;
     std::string symbol;
+    double last_price = 0.0;
     double bid_price = 0.0;
     double ask_price = 0.0;
     int64_t event_time = 0;
