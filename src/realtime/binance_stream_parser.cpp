@@ -33,10 +33,38 @@ BinanceStreamEvent BinanceStreamParser::parse(const std::string& raw_message) co
                 out.type = BinanceUpdateType::TICKER;
                 out.ticker.stream = doc.value("s", outer_stream);
                 out.ticker.symbol = out.ticker.stream;
-                out.ticker.bid_price = doc.value("b", 0.0);
-                out.ticker.ask_price = doc.value("a", 0.0);
-                out.ticker.last_price = doc.value("c", 0.0);
-                out.ticker.event_time = doc.value("E", int64_t(0));
+                auto get_double = [&](const char* key) -> double {
+                    if (!doc.contains(key)) return 0.0;
+                    const auto& v = doc[key];
+                    if (v.is_number()) return v.get<double>();
+                    if (v.is_string()) {
+                        try {
+                            return std::stod(v.get<std::string>());
+                        } catch (...) {
+                            return 0.0;
+                        }
+                    }
+                    return 0.0;
+                };
+                auto get_int64 = [&](const char* key) -> int64_t {
+                    if (!doc.contains(key)) return int64_t(0);
+                    const auto& v = doc[key];
+                    if (v.is_number_integer()) return v.get<int64_t>();
+                    if (v.is_number()) return static_cast<int64_t>(v.get<double>());
+                    if (v.is_string()) {
+                        try {
+                            return std::stoll(v.get<std::string>());
+                        } catch (...) {
+                            return int64_t(0);
+                        }
+                    }
+                    return int64_t(0);
+                };
+
+                out.ticker.bid_price = get_double("b");
+                out.ticker.ask_price = get_double("a");
+                out.ticker.last_price = get_double("c");
+                out.ticker.event_time = get_int64("E");
                 return out;
             }
             if (event == "depthUpdate") {
